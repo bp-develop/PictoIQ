@@ -46,6 +46,7 @@ class _LibraryPageState extends State<LibraryPage> {
   final _picker = ImagePicker();
   final _folderScanner = FolderDuplicateScanner();
   final _searchController = TextEditingController();
+  final _libraryHeadingKey = GlobalKey();
   List<PhotoAsset> _photos = [];
   FolderScanResult? _folderScan;
   FolderScanResult? _bestShotsScan;
@@ -154,6 +155,7 @@ class _LibraryPageState extends State<LibraryPage> {
             _folderScan = result;
           }
         });
+        _scrollToLibrary();
         _showMessage(
           result.duplicateGroups.isEmpty
               ? bestShots
@@ -184,6 +186,19 @@ class _LibraryPageState extends State<LibraryPage> {
         });
       }
     }
+  }
+
+  void _scrollToLibrary() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final target = _libraryHeadingKey.currentContext;
+      if (!mounted || target == null) return;
+      Scrollable.ensureVisible(
+        target,
+        alignment: 0,
+        duration: const Duration(milliseconds: 450),
+        curve: Curves.easeOutCubic,
+      );
+    });
   }
 
   Future<void> _deleteNewerCopies(FolderDuplicateGroup group) async {
@@ -475,19 +490,6 @@ class _LibraryPageState extends State<LibraryPage> {
                 child: _summary(duplicateGroups.length),
               ),
             ),
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(20, 22, 20, 8),
-              sliver: SliverToBoxAdapter(
-                child: _libraryHeading(visiblePhotos.length),
-              ),
-            ),
-            if (!_loading)
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-                sliver: SliverToBoxAdapter(
-                  child: _libraryControls(duplicateGroups),
-                ),
-              ),
             if ((_scanningFolder && !_scanningBestShots) ||
                 _folderScan != null ||
                 _folderScanError != null)
@@ -504,6 +506,20 @@ class _LibraryPageState extends State<LibraryPage> {
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
                 sliver: SliverToBoxAdapter(
                   child: _folderScanSection(bestShots: true),
+                ),
+              ),
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(20, 22, 20, 8),
+              sliver: SliverToBoxAdapter(
+                key: _libraryHeadingKey,
+                child: _libraryHeading(visiblePhotos.length),
+              ),
+            ),
+            if (!_loading)
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                sliver: SliverToBoxAdapter(
+                  child: _libraryControls(duplicateGroups),
                 ),
               ),
             if (_loading)
@@ -567,17 +583,13 @@ class _LibraryPageState extends State<LibraryPage> {
     children: [
       Row(
         children: [
-          Container(
-            width: 38,
-            height: 38,
-            decoration: BoxDecoration(
-              color: _green,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: const Icon(
-              Icons.photo_library_outlined,
-              color: Colors.white,
-              size: 21,
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Image.asset(
+              'assets/brand/pictoiq-icon.png',
+              width: 38,
+              height: 38,
+              fit: BoxFit.cover,
             ),
           ),
           const SizedBox(width: 10),
@@ -634,26 +646,9 @@ class _LibraryPageState extends State<LibraryPage> {
         style: TextStyle(color: _ink.withValues(alpha: .66), height: 1.45),
       ),
       const SizedBox(height: 17),
-      SizedBox(
-        width: double.infinity,
-        child: FilledButton.icon(
-          onPressed: _loading || _importing || _scanningFolder
-              ? null
-              : _choosePhotos,
-          icon: _importing
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.add_photo_alternate_outlined),
-          label: Text(_importing ? 'Adding photos…' : 'Choose photos'),
-          style: FilledButton.styleFrom(
-            minimumSize: const Size.fromHeight(48),
-            backgroundColor: _green,
-            foregroundColor: Colors.white,
-          ),
-        ),
+      Text(
+        'Scan a folder in place, or add selected photos to your PictoIQ library below.',
+        style: TextStyle(color: _ink.withValues(alpha: .66), height: 1.45),
       ),
       if (Platform.isAndroid) ...[
         const SizedBox(height: 8),
@@ -848,6 +843,27 @@ class _LibraryPageState extends State<LibraryPage> {
           style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
         ),
       ),
+      if (!_duplicatesOnly) ...[
+        const SizedBox(width: 8),
+        OutlinedButton.icon(
+          onPressed: _loading || _importing || _scanningFolder
+              ? null
+              : _choosePhotos,
+          icon: _importing
+              ? const SizedBox(
+                  width: 15,
+                  height: 15,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.add_photo_alternate_outlined, size: 17),
+          label: Text(_importing ? 'Adding…' : 'Add photos'),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: _green,
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+          ),
+        ),
+      ],
     ],
   );
 
