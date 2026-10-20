@@ -14,12 +14,27 @@ Open the local URL printed by ASP.NET Core. Use **Choose photos** to select imag
 
 Use **Remove from library** on a photo card to remove its saved index entry and current preview from PictoIQ. This does not delete or modify the original photo file.
 
+## Flutter mobile MVP
+
+The native app is in `mobile/`. It can select multiple images with the system photo picker, copy only those selected images to app-private storage, calculate SHA-256 fingerprints on-device, and save the index in SQLite. Exact-match groups are shown in the library. Removing a card deletes PictoIQ's private copy and index entry; the photo in the system gallery is left unchanged.
+
+Run on a connected Android device or emulator from the `mobile` directory:
+
+```powershell
+flutter pub get
+flutter run
+```
+
+The iOS project includes the photo-library usage description, but iOS builds require macOS and have not been verified.
+
+The mobile app also offers two separate folder scans: an exact duplicate scan based on SHA-256 and a best-shot scan that groups visually similar photos and ranks them using face, eye, smile, clarity, and lighting signals. Both flows ask for confirmation before deleting selected files.
+
 ## Current scope and limitations
 
-- Supports selected image files only. Videos, incremental mobile-media enumeration, SQLite, cloud accounts, and machine-learning analysis are not implemented.
+- Both apps analyze only images the user selects or grants through a folder picker. Videos, automatic whole-library enumeration, and cloud accounts are not implemented. Best-shot ranking is an on-device heuristic and can make mistakes; review selections before confirming deletion.
 - Exact matches are determined by SHA-256; files larger than 100 MB are skipped to bound browser memory use.
 - The local browser index stores image names, sizes, dates, and hashes—not image contents. Browser file access expires with the page, so reload the original files to preview them again.
-- The web app cannot request operating-system photo deletion approval and never deletes originals. Safe cleanup requires the native mobile media APIs, an explicit confirmation flow, and handling platform approval/partial failures.
+- Mobile folder cleanup uses Android's document-provider access granted by the user. The app does not scan the entire device gallery.
 - The target architecture in the supplied brief is a Flutter Android/iOS app with a .NET 10 backend added later. This prototype still targets .NET 9; installing .NET 10 does not migrate it or turn it into the native app.
 
 ## Android development environment
@@ -52,7 +67,7 @@ flutter doctor -v
 flutter devices
 ```
 
-The existing web project was successfully rebuilt using .NET SDK 10 after restoring its .NET 9 targeting packs. A separate Flutter Android sample was generated, but its first APK build was stopped at the user's request while bootstrapping dependencies. An Android APK build and real-device run have not yet been verified.
+The existing web project targets .NET 9. The Flutter Android app has been built and launched in the Android emulator; iOS builds have not been verified.
 
 ### Optional Android Studio and emulator
 
@@ -82,9 +97,9 @@ $android = "$env:ANDROID_HOME\cmdline-tools\latest\bin\android.exe"
 
 Use `& $android sdk install --help` and `& $android sdk list --all` to inspect supported commands and packages. Review any new licence prompts. Do not assume an installation succeeded solely from an exit code; confirm the installed files and run `flutter doctor -v`.
 
-### Building the future mobile project
+### Building the mobile app
 
-The current repository contains the web prototype, not a Flutter mobile application. After the mobile project is implemented, run these commands from the directory containing its `pubspec.yaml`:
+Run these commands from `mobile/`:
 
 ```powershell
 flutter pub get
