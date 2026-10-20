@@ -109,6 +109,13 @@ class FolderScanResult {
 
   int get duplicateFileCount =>
       duplicateGroups.fold(0, (count, group) => count + group.photos.length);
+
+  List<FolderScanPhoto> get removablePhotos => duplicateGroups
+      .expand((group) => bestShotsScan ? group.otherShots : group.newerCopies)
+      .toList(growable: false);
+
+  int get reclaimableBytes =>
+      removablePhotos.fold(0, (total, photo) => total + photo.size);
 }
 
 class FolderDuplicateScanner {

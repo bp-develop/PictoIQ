@@ -191,6 +191,7 @@ class _LibraryPageState extends State<LibraryPage> {
     if (scan == null) return;
     final original = group.original;
     final newerCopies = group.newerCopies;
+    final recoverableBytes = _groupReclaimableBytes(group, bestShots: false);
     final remove = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -205,6 +206,8 @@ class _LibraryPageState extends State<LibraryPage> {
                 Text(
                   'This will keep the oldest exact file and delete the newer identical copies listed below. Nothing is deleted until you confirm.',
                 ),
+                const SizedBox(height: 12),
+                _recoveryEstimate(recoverableBytes),
                 const SizedBox(height: 12),
                 for (final photo in newerCopies)
                   Padding(
@@ -241,9 +244,11 @@ class _LibraryPageState extends State<LibraryPage> {
       _scanningFolder = true;
       _scanningBestShots = false;
     });
+    var freedBytes = 0;
     try {
       for (final photo in newerCopies) {
         await _folderScanner.deleteFile(photo.uri);
+        freedBytes += photo.size;
       }
       final refreshed = await _folderScanner.scanUri(
         scan.folderUri,
@@ -255,7 +260,7 @@ class _LibraryPageState extends State<LibraryPage> {
       if (!mounted) return;
       setState(() => _folderScan = refreshed);
       _showMessage(
-        'Deleted ${newerCopies.length} newer exact copies; kept ${original.name}.',
+        'Freed about ${_formatBytes(freedBytes)}; kept ${original.name}.',
       );
     } catch (error) {
       if (!mounted) return;
@@ -270,7 +275,7 @@ class _LibraryPageState extends State<LibraryPage> {
       }
       if (mounted) {
         _showMessage(
-          'PictoIQ could not delete every newer copy. The folder scan has been refreshed where possible.',
+          'Freed about ${_formatBytes(freedBytes)} so far. PictoIQ could not finish deleting every copy.',
         );
       }
     } finally {
@@ -288,6 +293,7 @@ class _LibraryPageState extends State<LibraryPage> {
     if (scan == null) return;
     final keeper = group.recommended;
     final remove = group.otherShots;
+    final recoverableBytes = _groupReclaimableBytes(group, bestShots: true);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -300,6 +306,8 @@ class _LibraryPageState extends State<LibraryPage> {
               Text(
                 'Keep "${keeper.relativePath}" based on the quality signals. The following similar photos will be deleted from "${scan.folderName}":',
               ),
+              const SizedBox(height: 10),
+              _recoveryEstimate(recoverableBytes),
               const SizedBox(height: 10),
               for (final photo in remove)
                 Text(
@@ -330,9 +338,11 @@ class _LibraryPageState extends State<LibraryPage> {
       _scanningFolder = true;
       _scanningBestShots = true;
     });
+    var freedBytes = 0;
     try {
       for (final photo in remove) {
         await _folderScanner.deleteFile(photo.uri);
+        freedBytes += photo.size;
       }
       final refreshed = await _folderScanner.scanUri(
         scan.folderUri,
@@ -342,12 +352,12 @@ class _LibraryPageState extends State<LibraryPage> {
       if (!mounted) return;
       setState(() => _bestShotsScan = refreshed);
       _showMessage(
-        'Kept ${keeper.name} and deleted ${remove.length} similar photos.',
+        'Freed about ${_formatBytes(freedBytes)}; kept ${keeper.name}.',
       );
     } catch (error) {
       if (mounted) {
         _showMessage(
-          'PictoIQ could not delete every selected photo. Please scan the folder again.',
+          'Freed about ${_formatBytes(freedBytes)} so far. PictoIQ could not finish cleanup; scan the folder again.',
         );
       }
     } finally {
@@ -1073,6 +1083,8 @@ class _LibraryPageState extends State<LibraryPage> {
             ],
           ),
         ),
+        const SizedBox(height: 8),
+        _spaceRecoverySummary(scan, bestShots: bestShots),
         if (scan.duplicateGroups.isEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 8),
@@ -1099,8 +1111,75 @@ class _LibraryPageState extends State<LibraryPage> {
     );
   }
 
+  Widget _spaceRecoverySummary(
+    FolderScanResult scan, {
+    required bool bestShots,
+  }) {
+    final photos = scan.removablePhotos.length;
+    final description = photos == 0
+        ? 'No removable copies found in this folder.'
+        : 'Potential from $photos ${bestShots ? 'similar photos' : 'exact copies'}; review groups before deleting.';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE8F3E8),
+        border: Border.all(color: const Color(0xFFD2E5D1)),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.storage_rounded, color: _green, size: 23),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Potential space to recover',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  description,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    color: Color(0xFF596252),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            _formatBytes(scan.reclaimableBytes),
+            style: const TextStyle(
+              color: _green,
+              fontSize: 17,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _recoveryEstimate(int bytes) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(
+      color: const Color(0xFFE8F3E8),
+      borderRadius: BorderRadius.circular(10),
+    ),
+    child: Text(
+      'Estimated space to recover: up to ${_formatBytes(bytes)}',
+      style: const TextStyle(fontWeight: FontWeight.w700, color: _green),
+    ),
+  );
+
   Widget _exactDuplicateCard(FolderDuplicateGroup group) {
     final original = group.original;
+    final recoverableBytes = _groupReclaimableBytes(group, bestShots: false);
     return Card(
       margin: const EdgeInsets.only(top: 8),
       color: Colors.white,
@@ -1172,7 +1251,7 @@ class _LibraryPageState extends State<LibraryPage> {
                     : () => _deleteNewerCopies(group),
                 icon: const Icon(Icons.delete_outline, size: 18),
                 label: Text(
-                  'Keep oldest · delete ${group.newerCopies.length} newer',
+                  'Keep oldest · recover up to ${_formatBytes(recoverableBytes)}',
                 ),
                 style: FilledButton.styleFrom(foregroundColor: _ink),
               ),
@@ -1258,6 +1337,7 @@ class _LibraryPageState extends State<LibraryPage> {
 
   Widget _folderDuplicateCard(FolderDuplicateGroup group) {
     final original = group.recommended;
+    final recoverableBytes = _groupReclaimableBytes(group, bestShots: true);
     return Card(
       margin: const EdgeInsets.only(top: 8),
       color: Colors.white,
@@ -1335,7 +1415,7 @@ class _LibraryPageState extends State<LibraryPage> {
                     : () => _deleteSimilarShots(group),
                 icon: const Icon(Icons.delete_outline, size: 18),
                 label: Text(
-                  'Keep suggested best · review delete ${group.otherShots.length}',
+                  'Keep suggested · recover up to ${_formatBytes(recoverableBytes)}',
                 ),
                 style: FilledButton.styleFrom(foregroundColor: _ink),
               ),
@@ -1513,6 +1593,14 @@ class _LibraryPageState extends State<LibraryPage> {
     ),
   );
 }
+
+int _groupReclaimableBytes(
+  FolderDuplicateGroup group, {
+  required bool bestShots,
+}) => (bestShots ? group.otherShots : group.newerCopies).fold(
+  0,
+  (total, photo) => total + photo.size,
+);
 
 String _formatBytes(int bytes) {
   if (bytes < 1024) return '$bytes B';

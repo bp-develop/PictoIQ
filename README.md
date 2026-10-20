@@ -27,7 +27,9 @@ flutter run
 
 The iOS project includes the photo-library usage description, but iOS builds require macOS and have not been verified.
 
-The mobile app also offers two separate folder scans: an exact duplicate scan based on SHA-256 and a best-shot scan that groups visually similar photos and ranks them using face, eye, smile, clarity, and lighting signals. Both flows ask for confirmation before deleting selected files.
+The mobile app also offers two separate folder scans: an exact duplicate scan based on SHA-256 and a best-shot scan that groups visually similar photos and ranks them using face, eye, smile, clarity, and lighting signals. Results estimate the space recoverable from suggested removals, and cleanup reports the file sizes successfully removed. Both flows ask for confirmation before deleting selected files.
+
+The scalable camera, lens, sparkle, and checkmark logo is in `mobile/assets/brand/pictoiq-icon.svg`. On Windows, regenerate the matching Android and iOS launcher PNG sizes with `mobile/tool/generate_app_icons.ps1`.
 
 ## Current scope and limitations
 
