@@ -33,6 +33,19 @@ class FolderScanPhoto {
   final List<String> qualityNotes;
   final Uint8List? previewBytes;
 
+  FolderScanPhoto withPreviewBytes(Uint8List? bytes) => FolderScanPhoto(
+    uri: uri,
+    name: name,
+    relativePath: relativePath,
+    size: size,
+    modifiedAt: modifiedAt,
+    sha256: sha256,
+    visualHash: visualHash,
+    qualityScore: qualityScore,
+    qualityNotes: qualityNotes,
+    previewBytes: bytes,
+  );
+
   DateTime? get modifiedDate =>
       modifiedAt <= 0 ? null : DateTime.fromMillisecondsSinceEpoch(modifiedAt);
 }
@@ -236,6 +249,25 @@ class FolderDuplicateScanner {
             ),
       );
       duplicates.sort((a, b) => a.original.name.compareTo(b.original.name));
+
+      final groupsWithPreviews = <FolderDuplicateGroup>[];
+      for (final group in duplicates) {
+        final photosWithPreviews = <FolderScanPhoto>[];
+        for (final photo in group.photos) {
+          photosWithPreviews.add(
+            photo.withPreviewBytes(await _previewFor(photo.uri)),
+          );
+        }
+        groupsWithPreviews.add(
+          FolderDuplicateGroup(
+            sha256: group.sha256,
+            photos: photosWithPreviews,
+          ),
+        );
+      }
+      duplicates
+        ..clear()
+        ..addAll(groupsWithPreviews);
     }
 
     return FolderScanResult(
@@ -248,6 +280,20 @@ class FolderDuplicateScanner {
   }
 
   Future<void> deleteFile(String uri) => _saf.delete(uri);
+
+  Future<Uint8List?> _previewFor(String uri) async {
+    try {
+      final bytes = await (await _saf.readFileStream(uri))
+          .fold<List<int>>(<int>[], (all, part) => all..addAll(part));
+      final decoded = img.decodeImage(Uint8List.fromList(bytes));
+      if (decoded == null) return null;
+      return Uint8List.fromList(
+        img.encodeJpg(img.copyResize(decoded, width: 480), quality: 82),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
 
   Future<void> dispose() => _faceDetector.close();
 

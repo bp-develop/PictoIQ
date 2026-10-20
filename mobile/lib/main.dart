@@ -1117,6 +1117,11 @@ class _LibraryPageState extends State<LibraryPage> {
               '${group.photos.length} identical photos',
               style: const TextStyle(fontWeight: FontWeight.w700),
             ),
+            const SizedBox(height: 3),
+            const Text(
+              'Tap a thumbnail to inspect it before deleting copies.',
+              style: TextStyle(fontSize: 11, color: Color(0xFF77796F)),
+            ),
             const SizedBox(height: 6),
             for (final photo in group.oldestFirst)
               Padding(
@@ -1133,6 +1138,8 @@ class _LibraryPageState extends State<LibraryPage> {
                           : const Color(0xFFB37957),
                     ),
                     const SizedBox(width: 8),
+                    _exactDuplicateThumbnail(photo),
+                    const SizedBox(width: 10),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1171,6 +1178,79 @@ class _LibraryPageState extends State<LibraryPage> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _exactDuplicateThumbnail(FolderScanPhoto photo) {
+    final preview = photo.previewBytes;
+    return Tooltip(
+      message: preview == null ? 'Preview unavailable' : 'Tap to enlarge',
+      child: InkWell(
+        onTap: preview == null ? null : () => _showExactPhotoPreview(photo),
+        borderRadius: BorderRadius.circular(8),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: SizedBox(
+            width: 68,
+            height: 68,
+            child: preview == null
+                ? const ColoredBox(
+                    color: Color(0xFFF0F1EC),
+                    child: Icon(Icons.image_not_supported_outlined),
+                  )
+                : Image.memory(
+                    preview,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, _, _) => const ColoredBox(
+                      color: Color(0xFFF0F1EC),
+                      child: Icon(Icons.broken_image_outlined),
+                    ),
+                  ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showExactPhotoPreview(FolderScanPhoto photo) async {
+    final preview = photo.previewBytes;
+    if (preview == null) return;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => Dialog(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                photo.relativePath,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 12),
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.sizeOf(dialogContext).height * .65,
+                ),
+                child: InteractiveViewer(
+                  minScale: 1,
+                  maxScale: 4,
+                  child: Image.memory(preview, fit: BoxFit.contain),
+                ),
+              ),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Close'),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
