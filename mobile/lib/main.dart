@@ -46,8 +46,11 @@ class _LibraryPageState extends State<LibraryPage> {
   final _picker = ImagePicker();
   final _folderScanner = FolderDuplicateScanner();
   final _searchController = TextEditingController();
-  final _libraryHeadingKey = GlobalKey();
+  final _folderSelectionKey = GlobalKey();
+  final Map<String, int> _photoRatings = {};
   List<PhotoAsset> _photos = [];
+  FolderSelection? _selectedFolder;
+  FolderDateRange _folderDateRange = FolderDateRange.currentFolder;
   FolderScanResult? _folderScan;
   FolderScanResult? _bestShotsScan;
   bool _loading = true;
@@ -125,8 +128,32 @@ class _LibraryPageState extends State<LibraryPage> {
     await _runFolderScan(bestShots: true);
   }
 
+  Future<void> _chooseFolder() async {
+    if (_scanningFolder || _importing) return;
+    try {
+      final selected = await _folderScanner.pickFolder();
+      if (selected == null || !mounted) return;
+      setState(() {
+        _selectedFolder = selected;
+        _folderScan = null;
+        _bestShotsScan = null;
+        _folderScanError = null;
+        _bestShotsError = null;
+      });
+    } catch (error) {
+      if (mounted)
+        _showMessage('PictoIQ could not open that folder. Try again.');
+    }
+  }
+
   Future<void> _runFolderScan({required bool bestShots}) async {
-    if (!Platform.isAndroid || _scanningFolder || _importing) return;
+    final selectedFolder = _selectedFolder;
+    if (!Platform.isAndroid ||
+        selectedFolder == null ||
+        _scanningFolder ||
+        _importing) {
+      return;
+    }
     setState(() {
       _scanningFolder = true;
       _scanningBestShots = bestShots;
@@ -138,34 +165,33 @@ class _LibraryPageState extends State<LibraryPage> {
       }
     });
     try {
-      final result =
-          await (bestShots
-              ? _folderScanner.pickAndScanBestShots
-              : _folderScanner.pickAndScan)(
-            onProgress: (count) {
-              if (mounted) setState(() => _folderImagesScanned = count);
-            },
-          );
+      final result = await _folderScanner.scanUri(
+        selectedFolder.uri,
+        folderName: selectedFolder.name,
+        bestShotsScan: bestShots,
+        dateRange: _folderDateRange,
+        onProgress: (count) {
+          if (mounted) setState(() => _folderImagesScanned = count);
+        },
+      );
       if (!mounted) return;
-      if (result != null) {
-        setState(() {
-          if (bestShots) {
-            _bestShotsScan = result;
-          } else {
-            _folderScan = result;
-          }
-        });
-        _scrollToLibrary();
-        _showMessage(
-          result.duplicateGroups.isEmpty
-              ? bestShots
-                    ? 'Scanned ${result.imagesScanned} photos. No similar shots found.'
-                    : 'Scanned ${result.imagesScanned} photos. No exact duplicates found.'
-              : bestShots
-              ? 'Found ${result.duplicateGroups.length} best-shot groups in ${result.folderName}.'
-              : 'Found ${result.duplicateGroups.length} exact duplicate groups in ${result.folderName}.',
-        );
-      }
+      setState(() {
+        if (bestShots) {
+          _bestShotsScan = result;
+        } else {
+          _folderScan = result;
+        }
+      });
+      _scrollToFolderSelection();
+      _showMessage(
+        result.duplicateGroups.isEmpty
+            ? bestShots
+                  ? 'Scanned ${result.imagesScanned} photos. No similar shots found.${_skippedNote(result.imagesSkipped)}'
+                  : 'Scanned ${result.imagesScanned} photos. No exact duplicates found.${_skippedNote(result.imagesSkipped)}'
+            : bestShots
+            ? 'Found ${result.duplicateGroups.length} best-shot groups in ${result.folderName}.${_skippedNote(result.imagesSkipped)}'
+            : 'Found ${result.duplicateGroups.length} exact duplicate groups in ${result.folderName}.${_skippedNote(result.imagesSkipped)}',
+      );
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -188,9 +214,9 @@ class _LibraryPageState extends State<LibraryPage> {
     }
   }
 
-  void _scrollToLibrary() {
+  void _scrollToFolderSelection() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final target = _libraryHeadingKey.currentContext;
+      final target = _folderSelectionKey.currentContext;
       if (!mounted || target == null) return;
       Scrollable.ensureVisible(
         target,
@@ -201,16 +227,111 @@ class _LibraryPageState extends State<LibraryPage> {
     });
   }
 
+  void _setPhotoRating(String key, int rating) {
+    setState(() {
+      _photoRatings[key] = _photoRatings[key] == rating ? 0 : rating;
+    });
+  }
+
+  int _photoRating(String key) => _photoRatings[key] ?? 0;
+
+  FolderScanPhoto _bestShotKeeper(FolderDuplicateGroup group) {
+    final liked = group.photos
+        .where((photo) => _photoRating(photo.uri) > 0)
+        .toList();
+    if (liked.isNotEmpty) {
+      liked.sort((a, b) => b.qualityScore.compareTo(a.qualityScore));
+      return liked.first;
+    }
+    final notDisliked = group.photos
+        .where((photo) => _photoRating(photo.uri) >= 0)
+        .toList();
+    if (notDisliked.isNotEmpty) {
+      notDisliked.sort((a, b) => b.qualityScore.compareTo(a.qualityScore));
+      return notDisliked.first;
+    }
+    return group.recommended;
+  }
+
+  FolderScanPhoto _exactDuplicateKeeper(FolderDuplicateGroup group) {
+    final liked = group.photos
+        .where((photo) => _photoRating(photo.uri) > 0)
+        .toList();
+    if (liked.isNotEmpty) {
+      liked.sort((a, b) => a.modifiedAt.compareTo(b.modifiedAt));
+      return liked.first;
+    }
+    final notDisliked = group.oldestFirst
+        .where((photo) => _photoRating(photo.uri) >= 0)
+        .toList();
+    return notDisliked.isEmpty ? group.original : notDisliked.first;
+  }
+
+  List<FolderScanPhoto> _groupRemovals(
+    FolderDuplicateGroup group, {
+    required bool bestShots,
+  }) {
+    final keeper = bestShots
+        ? _bestShotKeeper(group)
+        : _exactDuplicateKeeper(group);
+    return group.photos.where((photo) => photo.uri != keeper.uri).toList();
+  }
+
+  List<FolderScanPhoto> _scanRemovals(
+    FolderScanResult scan, {
+    required bool bestShots,
+  }) => scan.duplicateGroups
+      .expand((group) => _groupRemovals(group, bestShots: bestShots))
+      .toList(growable: false);
+
+  int _groupRecoveryBytes(
+    FolderDuplicateGroup group, {
+    required bool bestShots,
+  }) => _groupRemovals(
+    group,
+    bestShots: bestShots,
+  ).fold(0, (total, photo) => total + photo.size);
+
+  Widget _photoRatingButtons(String key) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      IconButton(
+        tooltip: 'Thumbs up: prefer this photo',
+        visualDensity: VisualDensity.compact,
+        constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+        onPressed: () => _setPhotoRating(key, 1),
+        icon: Icon(
+          _photoRating(key) > 0 ? Icons.thumb_up : Icons.thumb_up_outlined,
+          size: 17,
+          color: _photoRating(key) > 0 ? _green : const Color(0xFF77796F),
+        ),
+      ),
+      IconButton(
+        tooltip: 'Thumbs down: avoid this photo',
+        visualDensity: VisualDensity.compact,
+        constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+        onPressed: () => _setPhotoRating(key, -1),
+        icon: Icon(
+          _photoRating(key) < 0 ? Icons.thumb_down : Icons.thumb_down_outlined,
+          size: 17,
+          color: _photoRating(key) < 0
+              ? const Color(0xFFB05F4B)
+              : const Color(0xFF77796F),
+        ),
+      ),
+    ],
+  );
+
   Future<void> _deleteNewerCopies(FolderDuplicateGroup group) async {
     final scan = _folderScan;
     if (scan == null) return;
-    final original = group.original;
-    final newerCopies = group.newerCopies;
-    final recoverableBytes = _groupReclaimableBytes(group, bestShots: false);
+    final original = _exactDuplicateKeeper(group);
+    final newerCopies = _groupRemovals(group, bestShots: false);
+    final recoverableBytes = _groupRecoveryBytes(group, bestShots: false);
     final remove = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Keep the oldest, delete newer copies?'),
+        title: const Text('Keep your preferred copy?'),
         content: SizedBox(
           width: 360,
           child: SingleChildScrollView(
@@ -219,7 +340,7 @@ class _LibraryPageState extends State<LibraryPage> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  'This will keep the oldest exact file and delete the newer identical copies listed below. Nothing is deleted until you confirm.',
+                  'PictoIQ will keep "${original.relativePath}" and delete the other identical copies listed below. Nothing is deleted until you confirm.',
                 ),
                 const SizedBox(height: 12),
                 _recoveryEstimate(recoverableBytes),
@@ -248,7 +369,7 @@ class _LibraryPageState extends State<LibraryPage> {
           ),
           FilledButton.tonal(
             onPressed: () => Navigator.pop(context, true),
-            child: Text('Delete ${newerCopies.length} newer'),
+            child: Text('Delete ${newerCopies.length} copies'),
           ),
         ],
       ),
@@ -268,6 +389,7 @@ class _LibraryPageState extends State<LibraryPage> {
       final refreshed = await _folderScanner.scanUri(
         scan.folderUri,
         folderName: scan.folderName,
+        dateRange: scan.dateRange,
         onProgress: (count) {
           if (mounted) setState(() => _folderImagesScanned = count);
         },
@@ -283,6 +405,7 @@ class _LibraryPageState extends State<LibraryPage> {
         final refreshed = await _folderScanner.scanUri(
           scan.folderUri,
           folderName: scan.folderName,
+          dateRange: scan.dateRange,
         );
         if (mounted) setState(() => _folderScan = refreshed);
       } catch (_) {
@@ -306,20 +429,20 @@ class _LibraryPageState extends State<LibraryPage> {
   Future<void> _deleteSimilarShots(FolderDuplicateGroup group) async {
     final scan = _bestShotsScan;
     if (scan == null) return;
-    final keeper = group.recommended;
-    final remove = group.otherShots;
-    final recoverableBytes = _groupReclaimableBytes(group, bestShots: true);
+    final keeper = _bestShotKeeper(group);
+    final remove = _groupRemovals(group, bestShots: true);
+    final recoverableBytes = _groupRecoveryBytes(group, bestShots: true);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Keep the suggested best shot?'),
+        title: const Text('Keep your preferred photo?'),
         content: SingleChildScrollView(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                'Keep "${keeper.relativePath}" based on the quality signals. The following similar photos will be deleted from "${scan.folderName}":',
+                'Keep "${keeper.relativePath}" based on your thumbs-up feedback and the photo quality signals. The other similar photos will be deleted from "${scan.folderName}":',
               ),
               const SizedBox(height: 10),
               _recoveryEstimate(recoverableBytes),
@@ -363,6 +486,7 @@ class _LibraryPageState extends State<LibraryPage> {
         scan.folderUri,
         folderName: scan.folderName,
         bestShotsScan: true,
+        dateRange: scan.dateRange,
       );
       if (!mounted) return;
       setState(() => _bestShotsScan = refreshed);
@@ -373,6 +497,125 @@ class _LibraryPageState extends State<LibraryPage> {
       if (mounted) {
         _showMessage(
           'Freed about ${_formatBytes(freedBytes)} so far. PictoIQ could not finish cleanup; scan the folder again.',
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _scanningFolder = false;
+          _scanningBestShots = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _deleteAllScanRemovables({required bool bestShots}) async {
+    final scan = bestShots ? _bestShotsScan : _folderScan;
+    if (scan == null || _scanningFolder) return;
+    final remove = _scanRemovals(scan, bestShots: bestShots);
+    if (remove.isEmpty) return;
+    final bytes = remove.fold<int>(0, (total, photo) => total + photo.size);
+    final category = bestShots
+        ? 'lower-rated similar shots'
+        : 'exact duplicate copies';
+    final keepDescription = bestShots
+        ? 'PictoIQ will keep your thumbs-up picks, or the highest-ranked photo in each group.'
+        : 'PictoIQ will keep your thumbs-up picks, or the oldest copy in each group.';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Delete all $category?'),
+        content: SizedBox(
+          width: 380,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Delete ${remove.length} photos from "${scan.folderName}"? $keepDescription',
+                ),
+                const SizedBox(height: 12),
+                _recoveryEstimate(bytes),
+                const SizedBox(height: 12),
+                for (final photo in remove.take(10))
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 5),
+                    child: Text(
+                      photo.relativePath,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                if (remove.length > 10)
+                  Text(
+                    'and ${remove.length - 10} more…',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                const SizedBox(height: 8),
+                const Text(
+                  'This deletes source files in the selected folder. Review the list before continuing.',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF77796F)),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.tonal(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: Text('Delete ${remove.length} photos'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() {
+      _scanningFolder = true;
+      _scanningBestShots = bestShots;
+      _folderImagesScanned = 0;
+    });
+    var freedBytes = 0;
+    var failedDeletes = 0;
+    for (final photo in remove) {
+      try {
+        await _folderScanner.deleteFile(photo.uri);
+        freedBytes += photo.size;
+      } catch (_) {
+        failedDeletes += 1;
+      }
+    }
+    try {
+      final refreshed = await _folderScanner.scanUri(
+        scan.folderUri,
+        folderName: scan.folderName,
+        bestShotsScan: bestShots,
+        dateRange: scan.dateRange,
+        onProgress: (count) {
+          if (mounted) setState(() => _folderImagesScanned = count);
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        if (bestShots) {
+          _bestShotsScan = refreshed;
+        } else {
+          _folderScan = refreshed;
+        }
+      });
+      _showMessage(
+        failedDeletes == 0
+            ? 'Freed about ${_formatBytes(freedBytes)}.'
+            : 'Freed ${_formatBytes(freedBytes)}. $failedDeletes photos could not be deleted.',
+      );
+    } catch (_) {
+      if (mounted) {
+        _showMessage(
+          'Freed ${_formatBytes(freedBytes)}. PictoIQ could not refresh the scan; scan this folder again.',
         );
       }
     } finally {
@@ -476,20 +719,20 @@ class _LibraryPageState extends State<LibraryPage> {
           slivers: [
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
-              sliver: SliverToBoxAdapter(
-                child: _header(duplicateGroups.length),
-              ),
+              sliver: SliverToBoxAdapter(child: _header()),
             ),
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
               sliver: SliverToBoxAdapter(child: _privacyBanner()),
             ),
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 4),
-              sliver: SliverToBoxAdapter(
-                child: _summary(duplicateGroups.length),
+            if (Platform.isAndroid)
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+                sliver: SliverToBoxAdapter(
+                  key: _folderSelectionKey,
+                  child: _folderSelection(),
+                ),
               ),
-            ),
             if ((_scanningFolder && !_scanningBestShots) ||
                 _folderScan != null ||
                 _folderScanError != null)
@@ -510,9 +753,12 @@ class _LibraryPageState extends State<LibraryPage> {
               ),
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(20, 22, 20, 8),
+              sliver: SliverToBoxAdapter(child: _libraryHeading()),
+            ),
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
               sliver: SliverToBoxAdapter(
-                key: _libraryHeadingKey,
-                child: _libraryHeading(visiblePhotos.length),
+                child: _summary(duplicateGroups.length),
               ),
             ),
             if (!_loading)
@@ -578,7 +824,7 @@ class _LibraryPageState extends State<LibraryPage> {
     );
   }
 
-  Widget _header(int duplicateCount) => Column(
+  Widget _header() => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       Row(
@@ -647,62 +893,124 @@ class _LibraryPageState extends State<LibraryPage> {
       ),
       const SizedBox(height: 17),
       Text(
-        'Scan a folder in place, or add selected photos to your PictoIQ library below.',
+        'Find duplicates and standout shots in a folder, then review your private photo library below.',
         style: TextStyle(color: _ink.withValues(alpha: .66), height: 1.45),
       ),
-      if (Platform.isAndroid) ...[
-        const SizedBox(height: 8),
-        SizedBox(
-          width: double.infinity,
-          child: OutlinedButton.icon(
-            onPressed: _loading || _importing || _scanningFolder
-                ? null
-                : _scanFolder,
-            icon: _scanningFolder && !_scanningBestShots
-                ? const SizedBox(
-                    width: 17,
-                    height: 17,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.copy_all_outlined),
-            label: Text(
-              _scanningFolder
-                  ? 'Scanning $_folderImagesScanned photos…'
-                  : 'Scan a folder for exact duplicates',
-            ),
-            style: OutlinedButton.styleFrom(
-              minimumSize: const Size.fromHeight(46),
-              foregroundColor: _green,
-            ),
+    ],
+  );
+
+  Widget _folderSelection() => Container(
+    padding: const EdgeInsets.all(15),
+    decoration: BoxDecoration(
+      color: const Color(0xFFEEF3E8),
+      border: Border.all(color: const Color(0xFFDDE7D4)),
+      borderRadius: BorderRadius.circular(14),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text(
+          'Folder selection',
+          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          'Choose a folder and scan recent photos or the whole folder.',
+          style: TextStyle(fontSize: 12, color: Color(0xFF596252)),
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(
+          onPressed: _scanningFolder || _importing ? null : _chooseFolder,
+          icon: const Icon(Icons.folder_open_outlined),
+          label: Text(_selectedFolder?.name ?? 'Choose a folder'),
+          style: OutlinedButton.styleFrom(
+            minimumSize: const Size.fromHeight(44),
+            foregroundColor: _green,
+            alignment: Alignment.centerLeft,
           ),
         ),
-        const SizedBox(height: 8),
-        SizedBox(
-          width: double.infinity,
-          child: OutlinedButton.icon(
-            onPressed: _loading || _importing || _scanningFolder
-                ? null
-                : _scanBestShotsFolder,
-            icon: _scanningBestShots
-                ? const SizedBox(
-                    width: 17,
-                    height: 17,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.auto_awesome_outlined),
-            label: Text(
-              _scanningBestShots
-                  ? 'Analyzing $_folderImagesScanned photos…'
-                  : 'Find the best shots in a folder',
-            ),
-            style: OutlinedButton.styleFrom(
-              minimumSize: const Size.fromHeight(46),
-              foregroundColor: _green,
-            ),
+        const SizedBox(height: 12),
+        const Text(
+          'Photo date',
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 6,
+          runSpacing: 2,
+          children: [
+            for (final range in FolderDateRange.values)
+              ChoiceChip(
+                label: Text(range.label),
+                selected: _folderDateRange == range,
+                onSelected: _scanningFolder
+                    ? null
+                    : (_) => setState(() {
+                        _folderDateRange = range;
+                        _folderScan = null;
+                        _bestShotsScan = null;
+                        _folderScanError = null;
+                        _bestShotsError = null;
+                      }),
+                visualDensity: VisualDensity.compact,
+              ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        FilledButton.icon(
+          onPressed:
+              _selectedFolder == null ||
+                  _loading ||
+                  _importing ||
+                  _scanningFolder
+              ? null
+              : _scanFolder,
+          icon: _scanningFolder && !_scanningBestShots
+              ? const SizedBox(
+                  width: 17,
+                  height: 17,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.copy_all_outlined),
+          label: Text(
+            _scanningFolder && !_scanningBestShots
+                ? 'Scanning $_folderImagesScanned photos…'
+                : 'Find exact duplicates',
+          ),
+          style: FilledButton.styleFrom(
+            minimumSize: const Size.fromHeight(44),
+            backgroundColor: _green,
+            foregroundColor: Colors.white,
+          ),
+        ),
+        const SizedBox(height: 7),
+        OutlinedButton.icon(
+          onPressed:
+              _selectedFolder == null ||
+                  _loading ||
+                  _importing ||
+                  _scanningFolder
+              ? null
+              : _scanBestShotsFolder,
+          icon: _scanningBestShots
+              ? const SizedBox(
+                  width: 17,
+                  height: 17,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.auto_awesome_outlined),
+          label: Text(
+            _scanningBestShots
+                ? 'Analyzing $_folderImagesScanned photos…'
+                : 'Find the best shots',
+          ),
+          style: OutlinedButton.styleFrom(
+            minimumSize: const Size.fromHeight(44),
+            foregroundColor: _green,
           ),
         ),
       ],
-    ],
+    ),
   );
 
   Widget _privacyBanner() => Container(
@@ -820,7 +1128,7 @@ class _LibraryPageState extends State<LibraryPage> {
     ),
   );
 
-  Widget _libraryHeading(int visibleCount) => Row(
+  Widget _libraryHeading() => Row(
     children: [
       Expanded(
         child: Text(
@@ -830,17 +1138,6 @@ class _LibraryPageState extends State<LibraryPage> {
             fontWeight: FontWeight.w700,
             letterSpacing: -.3,
           ),
-        ),
-      ),
-      Container(
-        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-        decoration: BoxDecoration(
-          color: const Color(0xFFEBEDE6),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Text(
-          '$visibleCount',
-          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
         ),
       ),
       if (!_duplicatesOnly) ...[
@@ -1091,9 +1388,9 @@ class _LibraryPageState extends State<LibraryPage> {
               Text(
                 scan.duplicateGroups.isEmpty
                     ? (bestShots
-                          ? 'Scanned ${scan.imagesScanned} images. No similar shots found.'
-                          : 'Scanned ${scan.imagesScanned} images. No exact duplicates found.')
-                    : 'Scanned ${scan.imagesScanned} images · ${scan.duplicateGroups.length} $groupLabel',
+                          ? 'Scanned ${scan.imagesScanned} images from ${scan.dateRange.label.toLowerCase()}. No similar shots found.${_skippedNote(scan.imagesSkipped)}'
+                          : 'Scanned ${scan.imagesScanned} images from ${scan.dateRange.label.toLowerCase()}. No exact duplicates found.${_skippedNote(scan.imagesSkipped)}')
+                    : 'Scanned ${scan.imagesScanned} images · ${scan.duplicateGroups.length} $groupLabel · ${scan.dateRange.label}${_skippedNote(scan.imagesSkipped)}',
                 style: const TextStyle(fontSize: 12, color: Color(0xFF596252)),
               ),
             ],
@@ -1101,6 +1398,22 @@ class _LibraryPageState extends State<LibraryPage> {
         ),
         const SizedBox(height: 8),
         _spaceRecoverySummary(scan, bestShots: bestShots),
+        if (_scanRemovals(scan, bestShots: bestShots).isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: FilledButton.tonalIcon(
+              onPressed: _scanningFolder
+                  ? null
+                  : () => _deleteAllScanRemovables(bestShots: bestShots),
+              icon: const Icon(Icons.delete_sweep_outlined),
+              label: Text(
+                bestShots
+                    ? 'Delete all lower-rated photos'
+                    : 'Delete all duplicates',
+              ),
+              style: FilledButton.styleFrom(foregroundColor: _ink),
+            ),
+          ),
         if (scan.duplicateGroups.isEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 8),
@@ -1131,7 +1444,12 @@ class _LibraryPageState extends State<LibraryPage> {
     FolderScanResult scan, {
     required bool bestShots,
   }) {
-    final photos = scan.removablePhotos.length;
+    final removable = _scanRemovals(scan, bestShots: bestShots);
+    final photos = removable.length;
+    final recoverableBytes = removable.fold<int>(
+      0,
+      (total, photo) => total + photo.size,
+    );
     final description = photos == 0
         ? 'No removable copies found in this folder.'
         : 'Potential from $photos ${bestShots ? 'similar photos' : 'exact copies'}; review groups before deleting.';
@@ -1168,7 +1486,7 @@ class _LibraryPageState extends State<LibraryPage> {
           ),
           const SizedBox(width: 8),
           Text(
-            _formatBytes(scan.reclaimableBytes),
+            _formatBytes(recoverableBytes),
             style: const TextStyle(
               color: _green,
               fontSize: 17,
@@ -1194,8 +1512,8 @@ class _LibraryPageState extends State<LibraryPage> {
   );
 
   Widget _exactDuplicateCard(FolderDuplicateGroup group) {
-    final original = group.original;
-    final recoverableBytes = _groupReclaimableBytes(group, bestShots: false);
+    final original = _exactDuplicateKeeper(group);
+    final recoverableBytes = _groupRecoveryBytes(group, bestShots: false);
     return Card(
       margin: const EdgeInsets.only(top: 8),
       color: Colors.white,
@@ -1224,11 +1542,11 @@ class _LibraryPageState extends State<LibraryPage> {
                 child: Row(
                   children: [
                     Icon(
-                      identical(photo, original)
+                      photo.uri == original.uri
                           ? Icons.check_circle_outline
                           : Icons.copy_outlined,
                       size: 18,
-                      color: identical(photo, original)
+                      color: photo.uri == original.uri
                           ? _green
                           : const Color(0xFFB37957),
                     ),
@@ -1247,7 +1565,7 @@ class _LibraryPageState extends State<LibraryPage> {
                             ),
                           ),
                           Text(
-                            '${identical(photo, original) ? 'Keep original' : 'Newer exact copy'} · ${_formatDate(photo.modifiedDate)} · ${_formatBytes(photo.size)}',
+                            '${photo.uri == original.uri ? 'Keep this copy' : 'Duplicate copy'} · ${_formatDate(photo.modifiedDate)} · ${_formatBytes(photo.size)}',
                             style: const TextStyle(
                               fontSize: 10,
                               color: Color(0xFF85877F),
@@ -1256,6 +1574,7 @@ class _LibraryPageState extends State<LibraryPage> {
                         ],
                       ),
                     ),
+                    _photoRatingButtons(photo.uri),
                   ],
                 ),
               ),
@@ -1267,7 +1586,7 @@ class _LibraryPageState extends State<LibraryPage> {
                     : () => _deleteNewerCopies(group),
                 icon: const Icon(Icons.delete_outline, size: 18),
                 label: Text(
-                  'Keep oldest · recover up to ${_formatBytes(recoverableBytes)}',
+                  'Keep selected · recover up to ${_formatBytes(recoverableBytes)}',
                 ),
                 style: FilledButton.styleFrom(foregroundColor: _ink),
               ),
@@ -1352,8 +1671,8 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   Widget _folderDuplicateCard(FolderDuplicateGroup group) {
-    final original = group.recommended;
-    final recoverableBytes = _groupReclaimableBytes(group, bestShots: true);
+    final original = _bestShotKeeper(group);
+    final recoverableBytes = _groupRecoveryBytes(group, bestShots: true);
     return Card(
       margin: const EdgeInsets.only(top: 8),
       color: Colors.white,
@@ -1389,11 +1708,11 @@ class _LibraryPageState extends State<LibraryPage> {
                       )
                     else
                       Icon(
-                        identical(photo, original)
+                        photo.uri == original.uri
                             ? Icons.check_circle_outline
                             : Icons.copy_outlined,
                         size: 18,
-                        color: identical(photo, original)
+                        color: photo.uri == original.uri
                             ? _green
                             : const Color(0xFFB37957),
                       ),
@@ -1410,7 +1729,7 @@ class _LibraryPageState extends State<LibraryPage> {
                             ),
                           ),
                           Text(
-                            '${identical(photo, original) ? 'Suggested best · ' : ''}Quality ${photo.qualityScore}/100 · ${photo.qualityNotes.join(' · ')}',
+                            '${photo.uri == original.uri ? 'Keep this photo · ' : ''}Quality ${photo.qualityScore}/100 · ${photo.qualityNotes.join(' · ')}',
                             style: const TextStyle(
                               fontSize: 10,
                               color: Color(0xFF85877F),
@@ -1419,6 +1738,7 @@ class _LibraryPageState extends State<LibraryPage> {
                         ],
                       ),
                     ),
+                    _photoRatingButtons(photo.uri),
                   ],
                 ),
               ),
@@ -1431,7 +1751,7 @@ class _LibraryPageState extends State<LibraryPage> {
                     : () => _deleteSimilarShots(group),
                 icon: const Icon(Icons.delete_outline, size: 18),
                 label: Text(
-                  'Keep suggested · recover up to ${_formatBytes(recoverableBytes)}',
+                  'Keep selected · recover up to ${_formatBytes(recoverableBytes)}',
                 ),
                 style: FilledButton.styleFrom(foregroundColor: _ink),
               ),
@@ -1568,6 +1888,10 @@ class _LibraryPageState extends State<LibraryPage> {
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(color: Color(0xFF92948A), fontSize: 9),
               ),
+              Align(
+                alignment: Alignment.centerRight,
+                child: _photoRatingButtons('library:${photo.id}'),
+              ),
             ],
           ),
         ),
@@ -1610,13 +1934,9 @@ class _LibraryPageState extends State<LibraryPage> {
   );
 }
 
-int _groupReclaimableBytes(
-  FolderDuplicateGroup group, {
-  required bool bestShots,
-}) => (bestShots ? group.otherShots : group.newerCopies).fold(
-  0,
-  (total, photo) => total + photo.size,
-);
+String _skippedNote(int skipped) => skipped == 0
+    ? ''
+    : ' $skipped skipped (unreadable or unsupported format; never deleted).';
 
 String _formatBytes(int bytes) {
   if (bytes < 1024) return '$bytes B';
