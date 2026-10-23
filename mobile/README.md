@@ -32,6 +32,14 @@ For device profiling, run `flutter run --profile` on a physical Android device a
 - Default selection is conservative: every thumbs-up photo is kept; otherwise the top-ranked photo is suggested. Bulk deletion only touches groups that are High match with a clear top photo, or groups where you chose.
 - Thresholds are starting points. Measure them on your own photos with `dart run tool/evaluate_similarity.dart <folder> <labels.csv>`; `test/similarity_evaluation_test.dart` is a synthetic regression set, not a measurement.
 
+## Best-shot ranking and review
+
+- Within each similar-photo group, photos are ranked on sharpness (Laplacian variance at a fixed 512 px size, compared with the group's sharpest photo), exposure (brightness plus blown highlights and crushed shadows) and resolution. Scores are relative to the group, not an absolute photo rating.
+- When every photo in a group was analysed and a face exists, eye-open and smile signals from ML Kit face detection add up to 30% of the score. They can be switched off in Settings (faster scans, nothing else changes).
+- Compare opens every photo in a group side by side with its score, strengths, concerns and measurements. "Keep this one" records your pick; "Reset my choices" returns the group to PictoIQ's suggestion.
+- "I choose which photos to keep" in Settings stops PictoIQ from selecting anything in similar-photo groups until you give a thumbs-up.
+- Face signals have not been benchmarked against alternative models. To do that, collect 50+ burst sets with blinks, compare the ranking with and without face signals (Settings switch) against your own pick, and time scans on a mid-range device.
+
 ## Getting Started
 
 This project is a starting point for a Flutter application.

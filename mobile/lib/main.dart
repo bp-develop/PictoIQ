@@ -1894,6 +1894,13 @@ class _LibraryPageState extends State<LibraryPage> {
                 style: const TextStyle(fontSize: 10, color: Color(0xFF85877F)),
               ),
             ],
+            if (group.ranking != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                group.ranking!.headline,
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+              ),
+            ],
             if (decision.needsReview) ...[
               const SizedBox(height: 6),
               Text(
@@ -1956,6 +1963,23 @@ class _LibraryPageState extends State<LibraryPage> {
                 ),
               ),
             const SizedBox(height: 4),
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                TextButton.icon(
+                  onPressed: () => _showCompareShots(group),
+                  icon: const Icon(Icons.compare_outlined, size: 18),
+                  label: const Text('Compare'),
+                ),
+                if (group.photos.any((p) => _photoRating(p.uri) != 0))
+                  TextButton(
+                    onPressed: () => _clearGroupMarks(group),
+                    child: const Text('Reset my choices'),
+                  ),
+              ],
+            ),
             Align(
               alignment: Alignment.centerRight,
               child: decision.hasDecision
@@ -1976,6 +2000,228 @@ class _LibraryPageState extends State<LibraryPage> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Marks [uri] as the only photo to keep in [group]: a thumbs-up for it and
+  /// no marks on the others, so every other photo becomes a removal candidate
+  /// only after the user confirms the delete dialog.
+  void _chooseKeeper(FolderDuplicateGroup group, String uri) {
+    setState(() {
+      for (final photo in group.photos) {
+        _photoRatings[photo.uri] = photo.uri == uri ? 1 : 0;
+      }
+    });
+  }
+
+  /// Removes the user's thumbs-up and thumbs-down marks from [group], which
+  /// returns it to PictoIQ's suggestion (or to nothing in manual mode).
+  void _clearGroupMarks(FolderDuplicateGroup group) {
+    setState(() {
+      for (final photo in group.photos) {
+        _photoRatings.remove(photo.uri);
+      }
+    });
+  }
+
+  String _percent(double value) => '${(value * 100).round()}%';
+
+  /// Side-by-side view of every photo in a similar-photo group, with the
+  /// measurements and reasons behind the ranking and a way to override it.
+  Future<void> _showCompareShots(FolderDuplicateGroup group) {
+    final ranking = group.ranking;
+    final bestSharpness = ranking == null || ranking.shots.isEmpty
+        ? 0.0
+        : ranking.shots
+              .map((shot) => shot.features.signals.sharpness)
+              .reduce((a, b) => a > b ? a : b);
+    return showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => Dialog(
+          insetPadding: const EdgeInsets.all(12),
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'Compare ${group.photos.length} similar photos',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  ranking == null
+                      ? 'No ranking is available for this group.'
+                      : '${ranking.headline}. Scores compare these photos with each other only; they are not a rating of the photo itself.',
+                  style: const TextStyle(fontSize: 11, color: Color(0xFF77796F)),
+                ),
+                const SizedBox(height: 10),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (final photo in group.bestFirst)
+                          _compareColumn(
+                            group,
+                            photo,
+                            bestSharpness,
+                            dialogContext,
+                            setDialogState,
+                          ),
+                      ],
+                    ),
+                    ),
+                  ),
+                ),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () => Navigator.pop(dialogContext),
+                    child: const Text('Close'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _compareColumn(
+    FolderDuplicateGroup group,
+    FolderScanPhoto photo,
+    double bestSharpness,
+    BuildContext dialogContext,
+    StateSetter setDialogState,
+  ) {
+    final shot = group.ranking?.shotFor(photo.uri);
+    final features = shot?.features ?? photo.features;
+    final signals = features?.signals;
+    final faces = features?.faces;
+    final chosen = _photoRating(photo.uri) > 0;
+    Widget line(IconData icon, Color color, String text) => Padding(
+      padding: const EdgeInsets.only(top: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 4),
+          Expanded(child: Text(text, style: const TextStyle(fontSize: 11))),
+        ],
+      ),
+    );
+    return Container(
+      width: 210,
+      margin: const EdgeInsets.only(right: 10),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        border: Border.all(
+          color: chosen ? _green : const Color(0xFFE6E8E0),
+          width: chosen ? 2 : 1,
+        ),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (photo.previewBytes != null)
+            InteractiveViewer(
+              minScale: 1,
+              maxScale: 4,
+              child: Image.memory(
+                photo.previewBytes!,
+                height: 170,
+                width: double.infinity,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) => const SizedBox(
+                  height: 170,
+                  child: Center(child: Icon(Icons.broken_image_outlined)),
+                ),
+              ),
+            )
+          else
+            const SizedBox(
+              height: 170,
+              child: Center(child: Icon(Icons.image_not_supported_outlined)),
+            ),
+          const SizedBox(height: 6),
+          Text(
+            shot == null
+                ? photo.relativePath
+                : '#${shot.rank} · ${shot.score}/100',
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+          Text(
+            photo.relativePath,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 10, color: Color(0xFF85877F)),
+          ),
+          if (shot != null) ...[
+            for (final reason in shot.strengths)
+              line(Icons.check_circle_outline, _green, reason),
+            for (final reason in shot.concerns)
+              line(
+                Icons.error_outline,
+                const Color(0xFFB37957),
+                reason,
+              ),
+          ],
+          const Divider(height: 14),
+          if (signals != null && bestSharpness > 0)
+            Text(
+              'Sharpness ${_percent(signals.sharpness / bestSharpness)} of best',
+              style: const TextStyle(fontSize: 10, color: Color(0xFF85877F)),
+            ),
+          if (features != null && features.megapixels > 0)
+            Text(
+              '${features.megapixels.toStringAsFixed(1)} MP · ${_formatBytes(photo.size)}',
+              style: const TextStyle(fontSize: 10, color: Color(0xFF85877F)),
+            ),
+          if (signals != null)
+            Text(
+              'Brightness ${_percent(signals.meanLuma / 255)}',
+              style: const TextStyle(fontSize: 10, color: Color(0xFF85877F)),
+            ),
+          if (faces != null)
+            Text(
+              faces.count == 0
+                  ? 'No faces found'
+                  : '${faces.count} face${faces.count == 1 ? '' : 's'}'
+                        '${faces.eyesOpenMin == null ? '' : ' · eyes open ${_percent(faces.eyesOpenMin!)}'}',
+              style: const TextStyle(fontSize: 10, color: Color(0xFF85877F)),
+            ),
+          const SizedBox(height: 6),
+          SizedBox(
+            width: double.infinity,
+            child: chosen
+                ? OutlinedButton.icon(
+                    onPressed: () {
+                      _setPhotoRating(photo.uri, 1);
+                      setDialogState(() {});
+                    },
+                    icon: const Icon(Icons.check, size: 16),
+                    label: const Text('Your pick · tap to undo'),
+                  )
+                : FilledButton.tonal(
+                    onPressed: () {
+                      _chooseKeeper(group, photo.uri);
+                      setDialogState(() {});
+                    },
+                    child: const Text('Keep this one'),
+                  ),
+          ),
+        ],
       ),
     );
   }
