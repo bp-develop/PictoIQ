@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
@@ -11,21 +12,27 @@ import 'package:path_provider/path_provider.dart';
 import 'package:saf/saf.dart';
 
 import 'scan_image_processing.dart';
+import 'shot_ranking.dart';
+import 'similarity_grouping.dart';
 
 class _ShotAnalysis {
   const _ShotAnalysis({
     required this.visualHash,
     required this.captureTime,
-    required this.technicalQuality,
+    required this.signals,
+    required this.megapixels,
     required this.preview,
     required this.faceImage,
   });
 
   final int visualHash;
   final (int, int) captureTime;
-  final (int, int) technicalQuality;
+  final ImageSignals signals;
+  final double megapixels;
   final Uint8List preview;
-  final Uint8List faceImage;
+
+  /// JPEG handed to face detection; null when face signals are turned off.
+  final Uint8List? faceImage;
 }
 
 class FolderScanPhoto {
@@ -42,14 +49,15 @@ class FolderScanPhoto {
     required this.previewBytes,
     this.capturedAt = 0,
     this.captureSource = captureSourceUnknown,
+    this.features,
   });
 
   /// Where [capturedAt] came from. Times from different sources are never
   /// compared with each other, because EXIF stores local wall-clock time while
   /// the file's modified time is a real instant.
-  static const captureSourceUnknown = 0;
-  static const captureSourceExif = 1;
-  static const captureSourceModified = 2;
+  static const captureSourceUnknown = CaptureSource.unknown;
+  static const captureSourceExif = CaptureSource.exif;
+  static const captureSourceModified = CaptureSource.modified;
 
   final String uri;
   final String name;
@@ -66,6 +74,10 @@ class FolderScanPhoto {
   final int capturedAt;
   final int captureSource;
 
+  /// Measurements the best-shot ranking works from. Null for exact-duplicate
+  /// scans, which do not analyse pixels.
+  final ShotFeatures? features;
+
   FolderScanPhoto withPreviewBytes(Uint8List? bytes) => FolderScanPhoto(
     uri: uri,
     name: name,
@@ -79,6 +91,27 @@ class FolderScanPhoto {
     previewBytes: bytes,
     capturedAt: capturedAt,
     captureSource: captureSource,
+    features: features,
+  );
+
+  /// Copy carrying the group-relative score and reasons from [rankShots].
+  FolderScanPhoto withQuality({
+    required int score,
+    required List<String> notes,
+  }) => FolderScanPhoto(
+    uri: uri,
+    name: name,
+    relativePath: relativePath,
+    size: size,
+    modifiedAt: modifiedAt,
+    sha256: sha256,
+    visualHash: visualHash,
+    qualityScore: score,
+    qualityNotes: notes,
+    previewBytes: previewBytes,
+    capturedAt: capturedAt,
+    captureSource: captureSource,
+    features: features,
   );
 
   DateTime? get modifiedDate =>
@@ -107,10 +140,19 @@ class FolderDuplicateGroup {
   FolderDuplicateGroup({
     required this.id,
     required List<FolderScanPhoto> photos,
+    this.evidence,
+    this.ranking,
   }) : photos = List.unmodifiable(photos);
 
   final String id;
   final List<FolderScanPhoto> photos;
+
+  /// How sure PictoIQ is that these are the same scene, and why. Null for
+  /// exact-duplicate groups, which are byte-for-byte identical.
+  final SimilarityEvidence? evidence;
+
+  /// Why the photos are ordered as they are. Null for exact-duplicate groups.
+  final GroupRanking? ranking;
 
   List<FolderScanPhoto> get oldestFirst {
     final sorted = [...photos];
@@ -131,6 +173,15 @@ class FolderDuplicateGroup {
   FolderScanPhoto get original => oldestFirst.first;
   List<FolderScanPhoto> get newerCopies => oldestFirst.skip(1).toList();
   List<FolderScanPhoto> get bestFirst {
+    final ranked = ranking;
+    if (ranked != null) {
+      final byId = {for (final photo in photos) photo.uri: photo};
+      final ordered = [
+        for (final shot in ranked.shots)
+          if (byId[shot.id] != null) byId[shot.id]!,
+      ];
+      if (ordered.length == photos.length) return ordered;
+    }
     final sorted = [...photos];
     sorted.sort((a, b) {
       final byQuality = b.qualityScore.compareTo(a.qualityScore);
@@ -179,22 +230,22 @@ class FolderScanResult {
 }
 
 class FolderDuplicateScanner {
-  FolderDuplicateScanner({Saf? saf}) : _saf = saf ?? Saf();
+  FolderDuplicateScanner({
+    Saf? saf,
+    this.thresholds = const SimilarityThresholds(),
+  }) : _saf = saf ?? Saf();
 
   final Saf _saf;
+
+  /// Limits for grouping similar photos and rating the confidence of a group.
+  final SimilarityThresholds thresholds;
+
   final FaceDetector _faceDetector = FaceDetector(
     options: FaceDetectorOptions(
       enableClassification: true,
       performanceMode: FaceDetectorMode.accurate,
     ),
   );
-
-  /// Photos with a known capture time are only grouped when taken within this
-  /// many milliseconds of each other. Tune to taste.
-  static const _similarShotWindowMs = 30 * 1000;
-
-  /// Maximum differing bits (out of 64) for two photos to count as similar.
-  static const _maxHashDistance = 10;
 
   static const _imageExtensions = {
     '.avif',
@@ -261,6 +312,7 @@ class FolderDuplicateScanner {
     String folderUri, {
     required String folderName,
     bool bestShotsScan = false,
+    bool useFaceSignals = true,
     FolderDateRange dateRange = FolderDateRange.currentFolder,
     void Function(int imagesScanned)? onProgress,
   }) async {
@@ -298,7 +350,9 @@ class FolderDuplicateScanner {
             await _saf.readFileStream(file.uri),
           );
           final modifiedAt = file.lastModified;
-          analysis = await Isolate.run(() => _analyzeShot(bytes, modifiedAt));
+          analysis = await Isolate.run(
+            () => _analyzeShot(bytes, modifiedAt, useFaceSignals),
+          );
         } else {
           digest = (await sha256.bind(await _saf.readFileStream(file.uri)).first)
               .toString();
@@ -315,9 +369,17 @@ class FolderDuplicateScanner {
         final (capturedAt, captureSource) = analysis == null
             ? (0, FolderScanPhoto.captureSourceUnknown)
             : analysis.captureTime;
-        final quality = analysis != null
-            ? await _qualityScore(analysis.faceImage, analysis.technicalQuality)
-            : (0, <String>[]);
+        ShotFeatures? features;
+        if (analysis != null) {
+          final faceImage = analysis.faceImage;
+          features = ShotFeatures(
+            signals: analysis.signals,
+            megapixels: analysis.megapixels,
+            faces: faceImage == null ? null : await _detectFaces(faceImage),
+          );
+        }
+        // Scores are relative to the rest of a group, so they are filled in
+        // after grouping (see _groupSimilarShots).
         final photo = FolderScanPhoto(
           uri: file.uri,
           name: file.name,
@@ -326,11 +388,12 @@ class FolderDuplicateScanner {
           modifiedAt: file.lastModified,
           sha256: digest,
           visualHash: visualHash,
-          qualityScore: quality.$1,
-          qualityNotes: quality.$2,
+          qualityScore: 0,
+          qualityNotes: const [],
           previewBytes: analysis?.preview,
           capturedAt: capturedAt,
           captureSource: captureSource,
+          features: features,
         );
         images.add(photo);
         imagesScanned += 1;
@@ -352,9 +415,10 @@ class FolderDuplicateScanner {
     final duplicates = <FolderDuplicateGroup>[];
     if (bestShotsScan) {
       duplicates.addAll(_groupSimilarShots(images));
-      duplicates.sort(
-        (a, b) => a.recommended.name.compareTo(b.recommended.name),
-      );
+      duplicates.sort((a, b) {
+        final byName = a.recommended.name.compareTo(b.recommended.name);
+        return byName != 0 ? byName : a.id.compareTo(b.id);
+      });
     } else {
       final exactGroups = <String, List<FolderScanPhoto>>{};
       for (final photo in images) {
@@ -368,7 +432,12 @@ class FolderDuplicateScanner {
                   FolderDuplicateGroup(id: entry.key, photos: entry.value),
             ),
       );
-      duplicates.sort((a, b) => a.original.name.compareTo(b.original.name));
+      duplicates.sort((a, b) {
+        final byName = a.original.name.compareTo(b.original.name);
+        return byName != 0
+            ? byName
+            : a.original.relativePath.compareTo(b.original.relativePath);
+      });
 
       final groupsWithPreviews = <FolderDuplicateGroup>[];
       for (final group in duplicates) {
@@ -420,250 +489,120 @@ class FolderDuplicateScanner {
 
   Future<void> dispose() => _faceDetector.close();
 
-  Future<(int, List<String>)> _qualityScore(
-    Uint8List bytes,
-    (int, int) technicalQuality,
-  ) async {
+  /// Runs face detection on one analysis image. Returns null when detection
+  /// fails, so the ranking treats that photo's faces as unknown rather than
+  /// absent and ignores face signals for its group.
+  Future<FaceSignals?> _detectFaces(Uint8List bytes) async {
     final temp = await getTemporaryDirectory();
-    final safeName = 'pictoiq-face-${DateTime.now().microsecondsSinceEpoch}.jpg';
+    final safeName =
+        'pictoiq-face-${DateTime.now().microsecondsSinceEpoch}.jpg';
     final file = File(p.join(temp.path, safeName));
     try {
       await file.writeAsBytes(bytes, flush: true);
       final faces = await _faceDetector.processImage(
         InputImage.fromFilePath(file.path),
       );
-      final (clarity, exposure) = technicalQuality;
-      if (faces.isEmpty) {
-        return (
-          (35 + clarity * .35 + exposure * .15).round(),
-          [
-            'No clear face detected',
-            'Clarity $clarity/100',
-            'Lighting $exposure/100',
-          ],
-        );
-      }
-      var faceScore = 0.0;
-      var eyes = 0;
-      var smiles = 0;
+      if (faces.isEmpty) return FaceSignals.none;
+      double? eyesOpenMin;
+      var smileTotal = 0.0;
+      var smileCount = 0;
       for (final face in faces) {
-        final eye = [
+        final eyes = [
           face.leftEyeOpenProbability,
           face.rightEyeOpenProbability,
-        ].whereType<double>().toList();
-        final eyeScore = eye.isEmpty
-            ? .45
-            : eye.reduce((a, b) => a + b) / eye.length;
-        final smile = face.smilingProbability ?? .45;
-        if (eyeScore >= .65) eyes++;
-        if (smile >= .55) smiles++;
-        faceScore += eyeScore * .65 + smile * .35;
+        ].whereType<double>();
+        for (final eye in eyes) {
+          eyesOpenMin = eyesOpenMin == null ? eye : math.min(eyesOpenMin, eye);
+        }
+        final smile = face.smilingProbability;
+        if (smile != null) {
+          smileTotal += smile;
+          smileCount++;
+        }
       }
-      final faceQuality = (faces.length * 12 + faceScore / faces.length * 45)
-          .clamp(0, 60);
-      final score = (faceQuality + clarity * .25 + exposure * .15)
-          .round()
-          .clamp(0, 100)
-          .toInt();
-      return (
-        score,
-        [
-          '${faces.length} face${faces.length == 1 ? '' : 's'} detected',
-          '$eyes with eyes likely open',
-          '$smiles smiling',
-          'Clarity $clarity/100',
-          'Lighting $exposure/100',
-        ],
+      return FaceSignals(
+        count: faces.length,
+        eyesOpenMin: eyesOpenMin,
+        smileAverage: smileCount == 0 ? null : smileTotal / smileCount,
       );
     } catch (error) {
-      debugPrint('Face quality unavailable: ${error.runtimeType}');
-      return (35, ['Face quality could not be assessed']);
+      debugPrint('Face signals unavailable: ${error.runtimeType}');
+      return null;
     } finally {
       if (await file.exists()) await file.delete();
     }
   }
 
-  static _ShotAnalysis? _analyzeShot(Uint8List bytes, int modifiedAt) {
+  static _ShotAnalysis? _analyzeShot(
+    Uint8List bytes,
+    int modifiedAt,
+    bool includeFaceImage,
+  ) {
     final decoded = decodeAnalysisImage(bytes);
     if (decoded == null) return null;
+    final (width, height) =
+        readImageSize(bytes) ?? (decoded.width, decoded.height);
     return _ShotAnalysis(
-      visualHash: _differenceHash(decoded),
-      captureTime: _captureTime(decoded, modifiedAt),
-      technicalQuality: _technicalQuality(decoded),
+      visualHash: differenceHash(decoded),
+      captureTime: captureTimeOf(decoded, modifiedAt),
+      signals: measureImage(decoded),
+      megapixels: width * height / 1000000,
       preview: encodePreview(decoded),
-      faceImage: img.encodeJpg(decoded, quality: 90),
+      faceImage: includeFaceImage ? img.encodeJpg(decoded, quality: 90) : null,
     );
   }
 
-  static (int, int) _technicalQuality(img.Image image) {
-    final small = img.copyResize(image, width: 64, height: 64);
-    final luminance = <double>[];
-    for (var y = 0; y < 64; y++) {
-      for (var x = 0; x < 64; x++) {
-        final pixel = small.getPixel(x, y);
-        luminance.add((pixel.r * 299 + pixel.g * 587 + pixel.b * 114) / 1000);
-      }
-    }
-    var laplacianVariance = 0.0;
-    var sum = 0.0;
-    var sumSquares = 0.0;
-    for (var y = 1; y < 63; y++) {
-      for (var x = 1; x < 63; x++) {
-        final i = y * 64 + x;
-        final center = luminance[i];
-        final laplacian =
-            luminance[i - 64] +
-            luminance[i + 64] +
-            luminance[i - 1] +
-            luminance[i + 1] -
-            4 * center;
-        sum += laplacian;
-        sumSquares += laplacian * laplacian;
-      }
-    }
-    const samples = 62 * 62;
-    laplacianVariance =
-        sumSquares / samples - (sum / samples) * (sum / samples);
-    final clarity = (laplacianVariance / 2.5).round().clamp(0, 100).toInt();
-    final average = luminance.reduce((a, b) => a + b) / luminance.length;
-    final exposure = (100 - ((average - 128).abs() * .75))
-        .round()
-        .clamp(0, 100)
-        .toInt();
-    return (clarity, exposure);
-  }
-
-  /// 64-bit difference hash: each bit records whether a pixel is brighter than
-  /// its right-hand neighbour in a 9x8 downscale. It reacts to structure rather
-  /// than overall brightness, so it separates different scenes better than an
-  /// average hash while still matching near-identical burst frames.
-  static int _differenceHash(img.Image image) {
-    final small = img.copyResize(
-      image,
-      width: 9,
-      height: 8,
-      interpolation: img.Interpolation.average,
-    );
-    int luminance(int x, int y) {
-      final pixel = small.getPixel(x, y);
-      return (pixel.r.toInt() * 299 +
-              pixel.g.toInt() * 587 +
-              pixel.b.toInt() * 114) ~/
-          1000;
-    }
-
-    var hash = 0;
-    for (var y = 0; y < 8; y++) {
-      for (var x = 0; x < 8; x++) {
-        hash = (hash << 1) | (luminance(x, y) > luminance(x + 1, y) ? 1 : 0);
-      }
-    }
-    return hash;
-  }
-
-  /// When the photo was taken: EXIF capture time when present, otherwise the
-  /// file's modified time, otherwise unknown (0).
-  static (int, int) _captureTime(img.Image image, int modifiedAt) {
-    try {
-      if (image.hasExif) {
-        final raw = image.exif.exifIfd[0x9003]?.toString().trim();
-        final match = raw == null
-            ? null
-            : RegExp(
-                r'^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})',
-              ).firstMatch(raw);
-        if (match != null) {
-          final year = int.parse(match.group(1)!);
-          final month = int.parse(match.group(2)!);
-          final day = int.parse(match.group(3)!);
-          if (year >= 1990 && month >= 1 && month <= 12 && day >= 1) {
-            final time = DateTime(
-              year,
-              month,
-              day,
-              int.parse(match.group(4)!),
-              int.parse(match.group(5)!),
-              int.parse(match.group(6)!),
-            );
-            return (
-              time.millisecondsSinceEpoch,
-              FolderScanPhoto.captureSourceExif,
-            );
-          }
-        }
-      }
-    } catch (_) {
-      // Fall back to the file's modified time below.
-    }
-    if (modifiedAt > 0) {
-      return (modifiedAt, FolderScanPhoto.captureSourceModified);
-    }
-    return (0, FolderScanPhoto.captureSourceUnknown);
-  }
-
-  /// Groups visually similar photos that were taken close together.
-  ///
-  /// Photos are put in capture-time order and linked to earlier neighbours
-  /// whose hash is close enough; linked photos form one group, so the result
-  /// does not depend on file order. Photos with different time sources (or no
-  /// time at all) are never compared with each other, and photos with a known
-  /// time must fall within [_similarShotWindowMs] of each other.
+  /// Groups visually similar photos, rates how sure each group is, and ranks
+  /// the photos inside it.
   List<FolderDuplicateGroup> _groupSimilarShots(List<FolderScanPhoto> images) {
-    final ordered = [...images]
-      ..sort((a, b) {
-        final bySource = a.captureSource.compareTo(b.captureSource);
-        if (bySource != 0) return bySource;
-        final byTime = a.capturedAt.compareTo(b.capturedAt);
-        if (byTime != 0) return byTime;
-        return a.relativePath.compareTo(b.relativePath);
-      });
-
-    final parent = List<int>.generate(ordered.length, (index) => index);
-    int find(int index) {
-      var root = index;
-      while (parent[root] != root) {
-        parent[root] = parent[parent[root]];
-        root = parent[root];
-      }
-      return root;
-    }
-
-    for (var i = 1; i < ordered.length; i++) {
-      final current = ordered[i];
-      final timed =
-          current.captureSource != FolderScanPhoto.captureSourceUnknown;
-      for (var j = i - 1; j >= 0; j--) {
-        final earlier = ordered[j];
-        if (earlier.captureSource != current.captureSource) break;
-        final gap = current.capturedAt - earlier.capturedAt;
-        if (timed && gap > _similarShotWindowMs) break;
-        if (_hammingDistance(earlier.visualHash, current.visualHash) <=
-            _maxHashDistance) {
-          final rootCurrent = find(i);
-          final rootEarlier = find(j);
-          if (rootCurrent != rootEarlier) parent[rootCurrent] = rootEarlier;
-        }
-      }
-    }
-
-    final clusters = <int, List<FolderScanPhoto>>{};
-    for (var i = 0; i < ordered.length; i++) {
-      clusters.putIfAbsent(find(i), () => []).add(ordered[i]);
-    }
+    final clusters = clusterSimilar(
+      [
+        for (final photo in images)
+          SimilarityCandidate(
+            visualHash: photo.visualHash,
+            capturedAt: photo.capturedAt,
+            captureSource: photo.captureSource,
+            tieBreaker: photo.relativePath,
+          ),
+      ],
+      thresholds: thresholds,
+    );
     return [
-      for (final cluster in clusters.values)
-        if (cluster.length > 1)
-          FolderDuplicateGroup(id: cluster.first.uri, photos: cluster),
+      for (final cluster in clusters)
+        _rankedGroup([
+          for (final index in cluster.members) images[index],
+        ], cluster.evidence),
     ];
   }
 
-  /// Number of differing bits between two 64-bit hashes.
-  int _hammingDistance(int left, int right) {
-    var x = left ^ right;
-    x = x - ((x >>> 1) & 0x5555555555555555);
-    x = (x & 0x3333333333333333) + ((x >>> 2) & 0x3333333333333333);
-    x = (x + (x >>> 4)) & 0x0f0f0f0f0f0f0f0f;
-    return (x * 0x0101010101010101) >>> 56;
+  FolderDuplicateGroup _rankedGroup(
+    List<FolderScanPhoto> members,
+    SimilarityEvidence evidence,
+  ) {
+    final ranking = rankShots([
+      for (final photo in members)
+        ShotInput(
+          id: photo.uri,
+          features: photo.features ?? ShotFeatures.unknown,
+          tieBreaker: photo.relativePath,
+        ),
+    ]);
+    final ranked = <FolderScanPhoto>[];
+    for (final photo in members) {
+      final shot = ranking.shotFor(photo.uri)!;
+      ranked.add(
+        photo.withQuality(
+          score: shot.score,
+          notes: [...shot.strengths, ...shot.concerns],
+        ),
+      );
+    }
+    return FolderDuplicateGroup(
+      id: members.first.uri,
+      photos: ranked,
+      evidence: evidence,
+      ranking: ranking,
+    );
   }
 
   bool _isImage(String name, String? mimeType) {

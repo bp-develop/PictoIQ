@@ -19,6 +19,15 @@ Future<Uint8List> collectImageBytes(Stream<List<int>> stream) async {
   return builder.takeBytes();
 }
 
+/// Width and height of the encoded image, read from its header without
+/// decoding any pixels. Returns null for unsupported data.
+(int, int)? readImageSize(Uint8List bytes) {
+  final decoder = img.findDecoderForData(bytes);
+  final info = decoder?.startDecode(bytes);
+  if (decoder == null || info == null) return null;
+  return (info.width, info.height);
+}
+
 /// JPEGs are subsampled during decoding; other formats have a pixel budget
 /// because their decoders still allocate a full frame before resizing.
 img.Image? decodeAnalysisImage(Uint8List bytes) {

@@ -25,6 +25,13 @@ Tests cover typed byte collection, encoded memory limits, image dimensions, EXIF
 
 For device profiling, run `flutter run --profile` on a physical Android device and compare the same large folder before/after with DevTools CPU, memory, and frame timelines. Record peak memory, scan duration, skipped count, and frames over the device frame budget. Synthetic timings are diagnostics, not device performance guarantees.
 
+## Similar-photo grouping
+
+- Similar photos are grouped by a 64-bit difference hash plus capture time (EXIF time when present, file time otherwise; the two are never compared). They are kept separate from exact duplicates and are never described as guaranteed duplicates.
+- Each group shows a High, Medium or Low match label with the facts behind it (hash spread, time span, time source). A chain of look-alikes whose ends differ a lot is marked Low.
+- Default selection is conservative: every thumbs-up photo is kept; otherwise the top-ranked photo is suggested. Bulk deletion only touches groups that are High match with a clear top photo, or groups where you chose.
+- Thresholds are starting points. Measure them on your own photos with `dart run tool/evaluate_similarity.dart <folder> <labels.csv>`; `test/similarity_evaluation_test.dart` is a synthetic regression set, not a measurement.
+
 ## Getting Started
 
 This project is a starting point for a Flutter application.
